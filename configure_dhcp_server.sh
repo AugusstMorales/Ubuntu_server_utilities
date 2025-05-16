@@ -74,6 +74,33 @@ fix_dhcp_syntax() {
 > "$LOG_FILE"
 log_message "Starting final DHCP server setup script"
 
+# Step 0: Clean up existing DHCP installations and configurations
+log_message "Step 0: Cleaning up existing DHCP installations and configurations"
+if dpkg -l | grep -q isc-dhcp-server; then
+    log_message "Uninstalling isc-dhcp-server package..."
+    apt-get purge -y isc-dhcp-server > /dev/null 2>&1
+    track_status_and_exit $? "Purging isc-dhcp-server package"
+    apt-get autoremove -y > /dev/null 2>&1
+    track_status_and_exit $? "Removing residual dependencies"
+fi
+rm -rf /etc/dhcp/* /etc/default/isc-dhcp-server /var/lib/dhcp* 2>/dev/null
+track_status_and_exit $? "Removing DHCP configuration files and directories"
+if [ -d "/etc/dhcp" ] || [ -f "/etc/default/isc-dhcp-server" ] || dpkg -l | grep -q isc-dhcp-server; then
+    log_message "WARNING: Some DHCP remnants detected. Please manually remove them or resolve conflicts."
+    exit 1
+else
+    log_message "System is clean of DHCP remnants"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+fi
+
+# Prompt for continuation
+log_message "System is ready for DHCP installation. Do you want to proceed? (yes/no)"
+read -p "" PROCEED
+if [ "$PROCEED" != "yes" ]; then
+    log_message "Installation aborted by user."
+    exit 0
+fi
+
 # Step 1: Verify system readiness
 log_message "Step 1: Verifying system readiness"
 
@@ -98,30 +125,15 @@ track_status_and_exit $? "Network connectivity check (ping to 8.8.8.8)"
 ip link show "$INTERFACE" > /dev/null 2>&1
 track_status_and_exit $? "Network interface $INTERFACE exists"
 
-# Step 2: Uninstall existing DHCP server (if installed)
-log_message "Step 2: Uninstalling existing DHCP server (if installed)"
-if dpkg -l | grep -q isc-dhcp-server; then
-    log_message "isc-dhcp-server is installed. Proceeding with uninstallation."
-    apt-get purge -y isc-dhcp-server > /dev/null 2>&1
-    track_status_and_exit $? "Purging isc-dhcp-server package"
-    apt-get autoremove -y > /dev/null 2>&1
-    track_status_and_exit $? "Removing residual dependencies"
-    rm -rf /etc/dhcp/dhcpd.conf /etc/default/isc-dhcp-server 2>/dev/null
-    track_status_and_exit $? "Removing existing DHCP configuration files"
-else
-    log_message "isc-dhcp-server is not installed. Skipping uninstallation."
-    SUCCESS_COUNT=$((SUCCESS_COUNT + 3))
-fi
-
-# Step 3: Install isc-dhcp-server
-log_message "Step 3: Installing isc-dhcp-server"
+# Step 2: Install isc-dhcp-server
+log_message "Step 2: Installing isc-dhcp-server"
 apt-get update > /dev/null 2>&1
 track_status_and_exit $? "Updating package lists"
 apt-get install -y isc-dhcp-server > /dev/null 2>&1
 track_status_and_exit $? "Installing isc-dhcp-server"
 
-# Step 4: Assign static IP to server (using netplan for modern Ubuntu)
-log_message "Step 4: Assigning static IP to server"
+# Step 3: Assign static IP to server (using netplan for modern Ubuntu)
+log_message "Step 3: Assigning static IP to server"
 NETPLAN_FILE="/etc/netplan/00-installer-config.yaml"
 if [ -d "/etc/netplan" ]; then
     cat > "$NETPLAN_FILE" << EOL
@@ -154,8 +166,9 @@ EOL
     track_status_and_exit $? "Applying network configuration"
 fi
 
-# Step 5: Verify server IP
-log_message "Step 5: Verifying server IP"
+# Step 4: Verify server IP with debugging
+log_message "Step 4: Verifying server IP"
+log_message "Raw IP output: $(ip addr show "$INTERFACE")"
 CURRENT_IP=$(ip addr show "$INTERFACE" | grep -oP 'inet \K[\d.]+/[0-9]+')
 if [ "$CURRENT_IP" == "$STATIC_IP" ]; then
     log_message "Server IP correctly set to $STATIC_IP"
@@ -165,14 +178,14 @@ else
     exit 1
 fi
 
-# Step 6: Configure DHCP server interface
-log_message "Step 6: Configuring DHCP server interface in /etc/default/isc-dhcp-server"
+# Step 5: Configure DHCP server interface
+log_message "Step 5: Configuring DHCP server interface in /etc/default/isc-dhcp-server"
 DHCP_DEFAULT_FILE="/etc/default/isc-dhcp-server"
 echo "INTERFACESv4=\"$INTERFACE\"" > "$DHCP_DEFAULT_FILE"
 track_status_and_exit $? "Writing to $DHCP_DEFAULT_FILE"
 
-# Step 7: Verify interface configuration
-log_message "Step 7: Verifying interface configuration"
+# Step 6: Verify interface configuration
+log_message "Step 6: Verifying interface configuration"
 if grep -q "INTERFACESv4=\"$INTERFACE\"" "$DHCP_DEFAULT_FILE"; then
     log_message "Interface $INTERFACE correctly configured in $DHCP_DEFAULT_FILE"
     SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -181,8 +194,8 @@ else
     exit 1
 fi
 
-# Step 8: Configure DHCP server (as per the PDF)
-log_message "Step 8: Configuring DHCP server in /etc/dhcp/dhcpd.conf"
+# Step 7: Configure DHCP server (as per the PDF)
+log_message "Step 7: Configuring DHCP server in /etc/dhcp/dhcpd.conf"
 DHCP_CONF_FILE="/etc/dhcp/dhcpd.conf"
 cat > "$DHCP_CONF_FILE" << EOL
 # Configuración básica para el servidor DHCP
@@ -204,23 +217,23 @@ host $CLIENT_NAME {
 EOL
 track_status_and_exit $? "Writing DHCP configuration to $DHCP_CONF_FILE"
 
-# Step 9: Validate and fix DHCP configuration syntax
-log_message "Step 9: Validating and fixing DHCP configuration syntax"
+# Step 8: Validate and fix DHCP configuration syntax
+log_message "Step 8: Validating and fixing DHCP configuration syntax"
 fix_dhcp_syntax "$DHCP_CONF_FILE"
 
-# Step 10: Restart and verify DHCP service
-log_message "Step 10: Restarting and verifying DHCP service"
+# Step 9: Restart and verify DHCP service
+log_message "Step 9: Restarting and verifying DHCP service"
 service isc-dhcp-server restart > /dev/null 2>&1
 track_status_and_exit $? "Restarting isc-dhcp-server"
 service isc-dhcp-server status | grep -q "active (running)"
 track_status_and_exit $? "Verifying isc-dhcp-server is active"
 
-# Step 11: Final verification (check if DHCP is listening)
-log_message "Step 11: Performing final verification"
+# Step 10: Final verification (check if DHCP is listening)
+log_message "Step 10: Performing final verification"
 ss -uln | grep -q ":67"
 track_status_and_exit $? "DHCP server listening on port 67"
 
-# Step 12: Summary report
+# Step 11: Summary report
 log_message "=== Final Summary ==="
 log_message "Successful steps: $SUCCESS_COUNT"
 log_message "Failed steps: $ERROR_COUNT"
